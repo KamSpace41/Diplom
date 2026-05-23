@@ -5,6 +5,9 @@ import model.FileEntity;
 import model.User;
 import repository.FileRepository;
 import repository.UserRepository;
+import exception.FileNotFoundException;
+import exception.FileStorageException;
+import exception.UserNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -35,86 +38,97 @@ public class FileService {
     private String storagePath;
 
     @Transactional(readOnly = true)
-    public List<FileResponse> getUserFiles(User user, int limit) {
+    public List<FileEntity> getUserFilesAsEntities(User user, int limit) {
         return fileRepository.findByUserAndDeletedFalseOrderByUploadedAtDesc(user)
                 .stream()
                 .limit(limit)
-                .map(this::toResponse)
                 .collect(Collectors.toList());
     }
 
     @Transactional
-    public FileResponse uploadFile(MultipartFile file, String customFilename, User user) throws IOException {
+    public FileEntity uploadFile(MultipartFile file, String customFilename, User user) {
         User managedUser = userRepository.findById(user.getId())
-                .orElseThrow(() -> new RuntimeException("User not found with id: " + user.getId()));
+                .orElseThrow(() -> new UserNotFoundException("User not found with id: " + user.getId()));
 
         log.info("Starting upload for user: {}", managedUser.getUsername());
 
-        Path uploadPath = Paths.get(storagePath);
-        if (!Files.exists(uploadPath)) {
-            Files.createDirectories(uploadPath);
+        try {
+            Path uploadPath = Paths.get(storagePath);
+            if (!Files.exists(uploadPath)) {
+                Files.createDirectories(uploadPath);
+            }
+
+            String originalFilename;
+            if (customFilename != null && !customFilename.isEmpty()) {
+                originalFilename = customFilename;
+            } else {
+                originalFilename = file.getOriginalFilename();
+            }
+
+            String extension = "";
+            if (originalFilename != null && originalFilename.contains(".")) {
+                extension = originalFilename.substring(originalFilename.lastIndexOf("."));
+            }
+            String storedFilename = UUID.randomUUID().toString() + extension;
+
+            Path filePath = uploadPath.resolve(storedFilename);
+            Files.copy(file.getInputStream(), filePath);
+
+            byte[] fileBytes = file.getBytes();
+            String fileHash = calculateHash(fileBytes);
+
+            FileEntity fileEntity = FileEntity.builder()
+                    .id(UUID.randomUUID().toString())
+                    .filename(storedFilename)
+                    .originalFilename(originalFilename)
+                    .filePath(filePath.toString())
+                    .fileSize(file.getSize())
+                    .contentType(file.getContentType())
+                    .fileHash(fileHash)
+                    .uploadedAt(LocalDateTime.now())
+                    .downloadCount(0L)
+                    .deleted(false)
+                    .user(managedUser)
+                    .build();
+
+            FileEntity savedEntity = fileRepository.save(fileEntity);
+            log.info("File uploaded successfully: {} by user {}", storedFilename, managedUser.getUsername());
+            return savedEntity;
+
+        } catch (IOException e) {
+            log.error("Error uploading file", e);
+            throw new FileStorageException("Failed to upload file: " + e.getMessage(), e);
         }
-
-        String originalFilename;
-        if (customFilename != null && !customFilename.isEmpty()) {
-            originalFilename = customFilename;
-        } else {
-            originalFilename = file.getOriginalFilename();
-        }
-
-        String extension = "";
-        if (originalFilename != null && originalFilename.contains(".")) {
-            extension = originalFilename.substring(originalFilename.lastIndexOf("."));
-        }
-        String storedFilename = UUID.randomUUID().toString() + extension;
-
-        Path filePath = uploadPath.resolve(storedFilename);
-        Files.copy(file.getInputStream(), filePath);
-
-        String fileHash = calculateHash(file.getBytes());
-
-        FileEntity fileEntity = FileEntity.builder()
-                .id(UUID.randomUUID().toString())
-                .filename(storedFilename)
-                .originalFilename(originalFilename)
-                .filePath(filePath.toString())
-                .fileSize(file.getSize())
-                .contentType(file.getContentType())
-                .fileHash(fileHash)
-                .uploadedAt(LocalDateTime.now())
-                .downloadCount(0L)
-                .deleted(false)
-                .user(managedUser)
-                .build();
-
-        fileRepository.save(fileEntity);
-        log.info("File uploaded successfully: {} by user {}", storedFilename, managedUser.getUsername());
-
-        return toResponse(fileEntity);
     }
 
     @Transactional(readOnly = true)
     public FileEntity findByUserAndOriginalFilename(User user, String originalFilename) {
         return fileRepository.findByUserAndOriginalFilenameAndDeletedFalse(user, originalFilename)
-                .orElseThrow(() -> new RuntimeException("File not found: " + originalFilename));
+                .orElseThrow(() -> new FileNotFoundException("File not found: " + originalFilename));
     }
 
     @Transactional
-    public void deleteFileByFilename(String filename, User user) throws IOException {
+    public void deleteFileByFilename(String filename, User user) {
         User managedUser = userRepository.findById(user.getId())
-                .orElseThrow(() -> new RuntimeException("User not found with id: " + user.getId()));
+                .orElseThrow(() -> new UserNotFoundException("User not found with id: " + user.getId()));
 
         FileEntity fileEntity = fileRepository.findByUserAndOriginalFilenameAndDeletedFalse(managedUser, filename)
-                .orElseThrow(() -> new RuntimeException("File not found: " + filename));
+                .orElseThrow(() -> new FileNotFoundException("File not found: " + filename));
 
-        Path filePath = Paths.get(fileEntity.getFilePath());
-        Files.deleteIfExists(filePath);
+        try {
+            Path filePath = Paths.get(fileEntity.getFilePath());
+            Files.deleteIfExists(filePath);
 
-        fileEntity.setDeleted(true);
-        fileEntity.setDeletedAt(LocalDateTime.now());
-        fileRepository.save(fileEntity);
+            fileEntity.setDeleted(true);
+            fileEntity.setDeletedAt(LocalDateTime.now());
+            fileRepository.save(fileEntity);
 
-        log.info("File deleted: {} by user {}", filename, managedUser.getUsername());
+            log.info("File deleted: {} by user {}", filename, managedUser.getUsername());
+
+        } catch (IOException e) {
+            log.error("Error deleting file", e);
+            throw new FileStorageException("Failed to delete file: " + e.getMessage(), e);
+        }
     }
 
     private String calculateHash(byte[] content) {
@@ -129,18 +143,8 @@ public class FileService {
             }
             return hexString.toString();
         } catch (NoSuchAlgorithmException e) {
-            log.error("Error calculating hash", e);
-            return null;
+            log.error("SHA-256 algorithm not found", e);
+            throw new FileStorageException("Failed to calculate file hash", e);
         }
-    }
-
-    private FileResponse toResponse(FileEntity file) {
-        return FileResponse.builder()
-                .id(file.getId())
-                .filename(file.getOriginalFilename())
-                .size(file.getFileSize())
-                .contentType(file.getContentType())
-                .uploadedAt(file.getUploadedAt())
-                .build();
     }
 }

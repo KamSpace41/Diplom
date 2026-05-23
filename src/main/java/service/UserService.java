@@ -2,6 +2,9 @@ package service;
 
 import model.User;
 import repository.UserRepository;
+import exception.UserNotFoundException;
+import exception.InvalidCredentialsException;
+import exception.UserAlreadyExistsException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -19,7 +22,7 @@ public class UserService {
     @Transactional
     public User createUser(String username, String rawPassword) {
         if (userRepository.existsByUsername(username)) {
-            throw new RuntimeException("User already exists: " + username);
+            throw new UserAlreadyExistsException("User already exists: " + username);
         }
 
         User user = User.builder()
@@ -36,19 +39,16 @@ public class UserService {
     public User authenticate(String username, String rawPassword) {
         log.info("=== START AUTHENTICATION ===");
         log.info("Username: {}", username);
-        log.info("Raw password: {}", rawPassword);
 
         User user = userRepository.findByUsername(username)
                 .or(() -> userRepository.findByEmail(username))
-                .orElseThrow(() -> new RuntimeException("User not found: " + username));
+                .orElseThrow(() -> new UserNotFoundException("User not found: " + username));
 
         log.info("User found: {}", user.getUsername());
-        log.info("Stored password hash: {}", user.getPassword());
-
 
         if (!user.checkPassword(rawPassword)) {
             log.error("Password mismatch for user: {}", username);
-            throw new RuntimeException("Invalid password");
+            throw new InvalidCredentialsException("Invalid password");
         }
 
         user.setLastLoginAt(LocalDateTime.now());

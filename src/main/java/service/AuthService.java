@@ -3,6 +3,8 @@ package service;
 import model.AuthToken;
 import model.User;
 import repository.AuthTokenRepository;
+import exception.TokenExpiredException;
+import exception.TokenInvalidException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -39,10 +41,10 @@ public class AuthService {
     @Transactional(readOnly = true)
     public User validateToken(String token) {
         AuthToken authToken = authTokenRepository.findByTokenAndRevokedFalse(token)
-                .orElseThrow(() -> new RuntimeException("Invalid or expired token"));
+                .orElseThrow(() -> new TokenInvalidException("Invalid or expired token"));
 
         if (authToken.isExpired()) {
-            throw new RuntimeException("Token expired");
+            throw new TokenExpiredException("Token expired");
         }
 
         return authToken.getUser();
